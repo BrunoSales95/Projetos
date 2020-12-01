@@ -37,5 +37,5 @@ costumo deixar em intervalos de 1h de segunda a sexta
 
 | Descrição | Link de Referência|
 | ---- | ---- |
-| Comando do cmd | https://www.colorconsole.de/console/en/index.htm|
+| Comando dos cmd | https://www.colorconsole.de/console/en/index.htm|
 | Como utilizar o angedador de tarefas do windows | https://www.profissionaisti.com.br/usando-o-agendador-de-tarefas-do-windows/|
