@@ -25,10 +25,10 @@ usuário possui premissão sem impactar no funcionamento do computador/notebook.
 
 ## Sugestões
 
-´´´sh
+```sh
 É interessante Criar um agendamento do windows para executar o script de tempos em tempos,
 costumo deixar em intervalos de 1h de segunda a sexta
-´´´
+```
 
 ---
 
