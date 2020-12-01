@@ -2,9 +2,9 @@
 
 ## Descrição
 
-´
+```ssh
 Script simples destinado a limpar as pastas de arquivos temporaríos do windows (temp, %temp%, Prefetch, Recent).
-´
+```
 
 ---
 
@@ -26,7 +26,7 @@ usuário possui premissão sem impactar no funcionamento do computador/notebook.
 ## Sugestões
 
 ```sh
-É interessante Criar um agendamento do windows para executar o script de tempos em tempos,
+É interessante Criar um agendamento no windows para executar o script de tempos em tempos,
 costumo deixar em intervalos de 1h de segunda a sexta
 ```
 
