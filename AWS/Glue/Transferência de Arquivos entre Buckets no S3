@@ -1,0 +1,54 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+
+## @params: [JOB_NAME]
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+job.commit()
+
+import boto3
+logger = glueContext.get_logger()
+
+bucketname = 'bucket-teste'
+s3 =  boto3.resource('s3')
+my_bucket = s3.Bucket(bucketname)
+
+caminho = 'teste/bronze/ticket/pendentes'
+novo_caminho = 'teste/bronze/ticket/processando'
+logger.info(f'Iniciando a aplicacao')
+anos = range(2016,2022)
+meses = range(1,12)
+sair = False
+for ano in anos:
+    if sair ==True:
+        break
+    for mes in meses:
+        if sair ==True:
+            break
+        caminho_diretorios = f'{caminho}/{ano}/{mes}/'
+        novo_caminho_diretorios = f'{novo_caminho}/{ano}/{mes}/'
+        for obj in my_bucket.objects.filter(Prefix=caminho_diretorios):
+            arquivo = (obj.key).split('/')[-1]
+            logger.info(f'Arquivo encontrado: {arquivo}')
+            copy_arquivo = {
+                "Bucket":bucketname,
+                "Key":obj.key
+            }
+            novo_caminho_arquivo = "{}{}".format(novo_caminho_diretorios, arquivo)
+            logger.info(f'Movendo Arquivo para: {novo_caminho_arquivo}')
+            s3.meta.client.copy(copy_arquivo, bucketname, novo_caminho_arquivo)
+            logger.info(f'Suceso ao mover o arquivo de ({obj.key}) para: ({novo_caminho_arquivo})')
+            logger.info(f'Deletando o registro: {bucketname}/{obj.key}')
+            s3.Object(bucketname, obj.key).delete()
+            sair = True
+            break
+logger.info(f'Executou a aplicacao')
