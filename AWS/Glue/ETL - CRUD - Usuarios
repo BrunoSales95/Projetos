@@ -1,0 +1,274 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+
+
+## @params: [JOB_NAME]
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+hadoop_conf = sc._jsc.hadoopConfiguration()
+hadoop_conf.set("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+hadoop_conf.set("mapreduce.fileoutputcommitter.marksuccessfuljobs", "false")
+job.commit()
+
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
+from delta.tables import DeltaTable
+from pyspark.sql.functions import *
+from delta.tables import *
+logger = glueContext.get_logger()
+import boto3
+import json
+import pandas as pd
+import pyspark
+import datetime
+from delta import *
+from pyspark.sql import Row, SparkSession, functions as F
+from pyspark.sql.types import *
+# create/get spark + glue context
+spark = GlueContext(SparkContext.getOrCreate()).sparkSession
+pd.set_option('display.max_rows', 500)
+pd.set_option('display.max_columns', 500)
+pd.set_option('display.width', 1000)
+
+# folder within S3 for the delta table
+logger.info('Iniciando execucao')
+# folder within S3 for the delta table
+
+def expandir_coluna_objeto(df, coluna, prefix=''):
+   df = df.drop(columns=coluna).join(pd.json_normalize(df[coluna],sep='_').add_prefix(prefix).apply(pd.Series))
+   return df
+
+def arquivos_json():
+    try:
+        s3_path = f"s3://bucket/projeto/silver/usuarios"
+        AWS_REGION = "us-east-1"
+        S3_BUCKET_NAME = 'bucket-teste'
+        s3_resource = boto3.resource("s3", region_name=AWS_REGION)
+        s3_bucket = s3_resource.Bucket(S3_BUCKET_NAME)
+        logger.info(f"Bucket: {s3_bucket}")
+        df_final = pd.DataFrame()
+        contador = 0
+        for obj in s3_bucket.objects.filter(Prefix='projeto/bronze/usuarios/pendentes/2016/10/'):
+            logger.info(f'Arquivo para extrair json: {obj}')
+            file_content = obj.get()['Body'].read().decode('utf-8')
+            json_content = json.loads(file_content)
+            df = pd.DataFrame(json_content['results'])
+            df_final = pd.concat([df,df_final])
+            contador += 1
+            if contador == 2:
+                break
+        df = df_final
+        return df
+    except Exception as e:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        logger.error('Erro: '+str(e)+' na linha '+str(exc_tb.tb_lineno))
+        return False
+def usuarios_geral():
+    try:
+        s3_path= f"s3://bucket-teste/projeto/silver/usuarios/usuarios/"
+        df = arquivos_json()
+        df['Year']= pd.to_datetime(df['updated_at']).dt.year
+        logger.info(f"DF pandas: {df.head()}")
+        df[df.select_dtypes("object").columns] =df.select_dtypes(include='object').fillna('')
+        df[df.select_dtypes("int64").columns] =df.select_dtypes(include='int64').fillna(0)
+        df[df.select_dtypes("float64").columns] =df.select_dtypes(include='float64').fillna(0)
+        df[df.select_dtypes("bool").columns] =df.select_dtypes(include='bool').fillna(False)
+        del df['tags']
+        del df['usuarios_fields']
+        logger.info('Sucesso Pandas')
+        logger.info(f'resultado pandas: {df.head()}')
+        logger.info(f'QTD DF pandas: {len(df)}')
+        #*********************************************************
+        #Definindo Schema de DF SPARK
+        #*********************************************************
+        schema = (StructType([
+            StructField("id",LongType(),True),
+            StructField("url",StringType(),True),
+            StructField("name",StringType(),True),
+            StructField("email",StringType(),True),
+            StructField("created_at",StringType(),True),
+            StructField("updated_at",StringType(),True),
+            StructField("time_zone",StringType(),True),                      
+            StructField("active",StringType(),True)
+		)
+        df_spark = spark.createDataFrame(df,schema=schema)
+        logger.info('Sucesso Spark')
+        logger.info(f'df: {df_spark.printSchema()}')
+        # Delta Lake usando merge ou append  ou upsert
+        logger.info('Criando arquivo Delta')
+        df_spark.write.format("delta").mode("append").partitionBy('Year').save(s3_path)
+        logger.info('Arquivo Delta criado com sucesso')
+        logger.info('Tirando os repetidos pelo update')
+        deltaTable = DeltaTable.forPath(spark, s3_path)
+        (
+        deltaTable.alias("df_delta").merge(
+        df_spark.alias("df_inserir"),
+        "df_delta.id = df_inserir.id")
+        .whenMatchedUpdate(set =
+         {"id": "df_inserir.id",
+            "url": "df_inserir.url",
+            "name": "df_inserir.name",
+            "email": "df_inserir.email",
+            "created_at": "df_inserir.created_at",
+            "updated_at": "df_inserir.updated_at",
+            "time_zone": "df_inserir.time_zone",            
+            "active": "df_inserir.active",            
+            "Year": "df_inserir.Year"
+            }
+         )
+        .whenNotMatchedInsertAll()
+        .execute()
+        )
+        logger.info('Sucesso ao tirando os repetidos')
+        logger.info('Arquivo Delta criado com sucesso')
+    except Exception as e:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        logger.error('Erro: '+str(e)+' na linha '+str(exc_tb.tb_lineno))
+        return False
+def usuarios_tags():
+    try:
+        s3_path = f"s3://bucket-teste/projeto/silver/usuarios/tags/"
+        df = arquivos_json()
+        df['Year']= pd.to_datetime(df['updated_at']).dt.year
+        df_tags = df[['id','tags', 'Year']]
+        logger.info(f'resultado pandas: {df_tags.head()}')
+        logger.info(f'QTD DF: {len(df_tags)}')
+        df = df_tags.explode('tags')
+        df[df.select_dtypes("object").columns] =df.select_dtypes(include='object').fillna('')
+        df[df.select_dtypes("int64").columns] =df.select_dtypes(include='int64').fillna(0)
+        df[df.select_dtypes("float64").columns] =df.select_dtypes(include='float64').fillna(0)
+        df[df.select_dtypes("bool").columns] =df.select_dtypes(include='bool').fillna(False)
+        logger.info(f'resultado pandas: {df.head()}')
+        #*********************************************************
+        #Definindo Schema de DF SPARK
+        #*********************************************************
+        schema = (StructType([
+                StructField("id",LongType(),True),
+                StructField("tags",StringType(),True),
+                StructField("Year",StringType(),True)]))
+        df_spark = spark.createDataFrame(df,schema=schema)
+        logger.info('Sucesso Spark')
+        logger.info(f'df: {df_spark.printSchema()}')
+        # Delta Lake usando merge ou append  ou upsert
+        logger.info('Criando arquivo Delta')
+        df_spark.write.format("delta").mode("append").partitionBy('Year').save(s3_path)
+        logger.info('Arquivo Delta criado com sucesso')
+        logger.info('Tirando os repetidos pelo update')
+        deltaTable = DeltaTable.forPath(spark, s3_path)
+        (
+        deltaTable.alias("df_delta").merge(
+        df_spark.alias("df_inserir"),
+        "df_delta.id = df_inserir.id")
+        .whenMatchedUpdate(set =
+        {"id": "df_inserir.id",
+         "tags": "df_inserir.tags",
+         "Year": "df_inserir.Year"
+                }
+             )
+        .whenNotMatchedInsertAll()
+        .execute()
+        )
+        logger.info('Sucesso ao tirando os repetidos')
+        logger.info('Arquivo Delta criado com sucesso')
+    except Exception as e:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        logger.error('Erro: '+str(e)+' na linha '+str(exc_tb.tb_lineno))
+        return False
+
+def usuarios_fields():
+    try:
+        s3_path = f"s3://bucket-teste/projeto/silver/usuarios/campos/"
+        df = arquivos_json()
+        df['Year']= pd.to_datetime(df['updated_at']).dt.year
+        df = df[['id','usuarios_fields', 'Year']]
+        df[df.select_dtypes("object").columns] =df.select_dtypes(include='object').fillna('')
+        df[df.select_dtypes("int64").columns] =df.select_dtypes(include='int64').fillna(0)
+        df[df.select_dtypes("float64").columns] =df.select_dtypes(include='float64').fillna(0)
+        df[df.select_dtypes("bool").columns] =df.select_dtypes(include='bool').fillna(False)
+        df = expandir_coluna_objeto(df,'usuarios_fields', prefix='usuarios_')
+        coluna = df.columns.tolist()
+        coluna.remove('id')
+        coluna.remove('Year')
+        df = pd.melt(df,id_vars=['id', 'Year'], value_vars=coluna)
+        logger.info(f'Colunas: {coluna}')
+        logger.info(f'resultado pandas: {df.head()}')
+        logger.info(f'QTD DF: {len(df)}')
+        #*********************************************************
+        #Definindo Schema de DF SPARK
+        #*********************************************************
+        schema = (StructType([
+                StructField("id",LongType(),True),
+                StructField("Year",StringType(),True),
+                StructField("variable",StringType(),True),
+                StructField("value",StringType(),True)]))
+        df_spark = spark.createDataFrame(df,schema=schema)
+        logger.info('Sucesso Spark')
+        logger.info(f'df: {df_spark.printSchema()}')
+        # Delta Lake usando merge ou append  ou upsert
+        logger.info('Criando arquivo Delta')
+        df_spark.write.format("delta").mode("append").partitionBy('Year').save(s3_path)
+        logger.info('Arquivo Delta criado com sucesso')
+        logger.info('Tirando os repetidos pelo update')
+        deltaTable = DeltaTable.forPath(spark, s3_path)
+        (
+        deltaTable.alias("df_delta").merge(
+        df_spark.alias("df_inserir"),
+        "df_delta.id = df_inserir.id")
+        .whenMatchedUpdate(set =
+        {"id": "df_inserir.id",
+         "Year": "df_inserir.tags",
+         "variable": "df_inserir.variable",
+         "value": "df_inserir.value"
+                }
+             )
+        .whenNotMatchedInsertAll()
+        .execute()
+        )
+        logger.info('Sucesso ao tirando os repetidos')
+        logger.info('Arquivo Delta criado com sucesso')
+    except Exception as e:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        logger.error('Erro: '+str(e)+' na linha '+str(exc_tb.tb_lineno))
+        return False
+
+
+def exibirDadosS3(s3_path,s3_path_csv ):
+    try:
+        logger.info("Lendo DF:")
+        df = spark.read.format("delta").load(s3_path)
+        df_pandas  = df.toPandas()
+        logger.info(f"DF pandas: {df_pandas}")
+        logger.info(f"QTD do DF: {df.count()}")
+        logger.info('Transformando e salvando em csv')
+        logger.info('Salvando em CSV')
+        df.write.format("csv").option("header",True).option("delimiter",";").mode("overwrite").save(s3_path_csv)
+        logger.info('Salvou em CSV')
+    except Exception as e:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        logger.error('Erro: '+str(e)+' na linha '+str(exc_tb.tb_lineno))
+        return False
+
+def executarETL():
+    s3_path_usuarios = f"s3://bucket-teste/projeto/silver/usuarios/usuarios/"
+    s3_path_tags = f"s3://bucket-teste/projeto/silver/usuarios/tags/"
+    s3_path_campos = f"s3://bucket-teste/projeto/silver/usuarios/campos/"
+    s3_path_csv_usuarios = f"s3://bucket-teste/projeto/silver/usuarios/usuarios_delta_para_csv/"
+    s3_path_csv_tags = f"s3://bucket-teste/projeto/silver/usuarios/tags_delta_para_csv/"
+    s3_path_csv_campos = f"s3://bucket-teste/projeto/silver/usuarios/campos_delta_para_csv/"
+    arquivos_json()
+    usuarios_geral()
+    usuarios_tags()
+    usuarios_fields()
+    exibirDadosS3(s3_path_usuarios,s3_path_csv_usuarios)
+    exibirDadosS3(s3_path_tags,s3_path_csv_tags)
+    exibirDadosS3(s3_path_campos,s3_path_csv_campos)
+executarETL()
